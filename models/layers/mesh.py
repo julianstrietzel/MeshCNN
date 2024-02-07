@@ -1,14 +1,16 @@
-from tempfile import mkstemp
-from shutil import move
-import torch
-import numpy as np
 import os
-from models.layers.mesh_union import MeshUnion
+from shutil import move
+from tempfile import mkstemp
+
+import numpy as np
+import torch
+
 from models.layers.mesh_prepare import fill_mesh
+from models.layers.mesh_union import MeshUnion
 
 
 class Mesh:
-    def __init__(self, file=None, opt=None, hold_history=False, export_folder=""):
+    def __init__(self, file=None, opt=None, hold_history=False, export_folder=None):
         self.vs = self.v_mask = self.filename = self.features = self.edge_areas = None
         self.edges = self.gemm_edges = self.sides = None
         self.pool_count = 0
@@ -18,6 +20,7 @@ class Mesh:
         if hold_history:
             self.init_history()
         self.export()
+        self.normed = None
 
     def extract_features(self):
         return self.features
@@ -217,7 +220,7 @@ class Mesh:
             self.history_data["current2old"][0 : self.edges_count] = np.ma.where(mask)[
                 0
             ]
-            if self.export_folder != "":
+            if self.export_folder and self.export_folder != "":
                 self.history_data["edges_mask"].append(
                     self.history_data["edges_mask"][-1].clone()
                 )

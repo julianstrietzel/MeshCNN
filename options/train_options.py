@@ -19,7 +19,7 @@ class TrainOptions(BaseOptions):
         self.parser.add_argument(
             "--save_epoch_freq",
             type=int,
-            default=1,
+            default=50,
             help="frequency of saving checkpoints at the end of epochs",
         )
         self.parser.add_argument(
@@ -54,7 +54,7 @@ class TrainOptions(BaseOptions):
         self.parser.add_argument(
             "--niter_decay",
             type=int,
-            default=500,
+            default=100,
             help="# of iter to linearly decay learning rate to zero",
         )
         self.parser.add_argument(
@@ -77,7 +77,10 @@ class TrainOptions(BaseOptions):
         )
         # data augmentation stuff
         self.parser.add_argument(
-            "--num_aug", type=int, default=10, help="# of augmentation files"
+            "--num_aug",
+            type=int,
+            default=1,
+            help="# of augmentation files in regression should be set to 1 (nothing)",
         )
         self.parser.add_argument(
             "--scale_verts",
@@ -87,13 +90,13 @@ class TrainOptions(BaseOptions):
         self.parser.add_argument(
             "--slide_verts",
             type=float,
-            default=0,
+            default=0.2,
             help="percent vertices which will be shifted along the mesh surface",
         )
         self.parser.add_argument(
             "--flip_edges",
             type=float,
-            default=0,
+            default=0.2,
             help="percent of edges to randomly flip",
         )
         # tensorboard visualization

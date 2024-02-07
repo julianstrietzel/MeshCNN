@@ -1,15 +1,24 @@
 import argparse
+import datetime
 import os
-from util import util
+import warnings
+
 import torch
+
+from util import util
+
+time_s = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 class BaseOptions:
+    EXTRACTOR_CLASS = "MeshCNN"
+
     def __init__(self):
         self.parser = argparse.ArgumentParser(
             formatter_class=argparse.ArgumentDefaultsHelpFormatter
         )
         self.initialized = False
+        self.is_train = False
 
     def initialize(self):
         # data params
@@ -20,7 +29,7 @@ class BaseOptions:
         )
         self.parser.add_argument(
             "--dataset_mode",
-            choices={"classification", "segmentation"},
+            choices={"classification", "segmentation", "regression"},
             default="classification",
         )
         self.parser.add_argument(
@@ -43,7 +52,7 @@ class BaseOptions:
             "--arch", type=str, default="mconvnet", help="selects network to use"
         )  # todo add choices
         self.parser.add_argument(
-            "--resblocks", type=int, default=0, help="# of res blocks"
+            "--resblocks", type=int, default=1, help="# of res blocks"
         )
         self.parser.add_argument(
             "--fc_n", type=int, default=100, help="# between fc and nclasses"
@@ -81,7 +90,7 @@ class BaseOptions:
         )
         # general params
         self.parser.add_argument(
-            "--num_threads", default=3, type=int, help="# threads for loading data"
+            "--num_threads", default=1, type=int, help="# threads for loading data"
         )
         self.parser.add_argument(
             "--gpu_ids",
@@ -115,6 +124,60 @@ class BaseOptions:
             help="exports intermediate collapses to this folder",
         )
         #
+        # sdf_regressino arguments
+        self.parser.add_argument(
+            "--point_encode",
+            type=str,
+            default="no_encode",
+            help="point encoding method from no_encdoe or positional_encoding_3d",
+        )
+        self.parser.add_argument(
+            "--include_input_in_encoding",
+            type=bool,
+            default=True,
+            help="Whether to include the input coords in the point encoding",
+        )
+        self.parser.add_argument(
+            "--num_freqs",
+            type=int,
+            default=2,
+            help="number of frequencies to use in positional encoding",  #
+        )
+        self.parser.add_argument(
+            "--normalize_mesh",
+            action="store_true",
+            default=False,
+            help="Whether to normalize the mesh like bacon",
+        )
+        self.parser.add_argument(
+            "--normalize_features",
+            action="store_true",
+            default=False,
+            help="Whether to normalize the edge features in meshcnn meshes using std and mean",
+        )
+
+        self.parser.add_argument(
+            "--loss", type=str, default="mse", help="loss function to use",
+        )
+        self.parser.add_argument(
+            "--loss_alpha",
+            type=float,
+            default=0.5,
+            help="alpha param for loss function",
+        )
+
+        self.parser.add_argument(
+            "--relu_deactivated",
+            action="store_true",
+            default=False,
+            help="Whether to deactivate relu in the convolutionals within the network. Default is False, deactivation is recommended for regression.",
+        )
+        self.parser.add_argument(
+            "--pretrained_path",
+            type=str,
+            default="",
+            help="pre-trained model path can be found at ./checkpoints/shrec16/pre_trained_removed_layers.pth",
+        )
         self.initialized = True
 
     def parse(self):
@@ -122,7 +185,9 @@ class BaseOptions:
             self.initialize()
         self.opt, unknown = self.parser.parse_known_args()
         self.opt.is_train = self.is_train  # train or test
-
+        if unknown:
+            warnings.warn("unknown arguments:")
+            print(unknown)
         str_ids = self.opt.gpu_ids.split(",")
         self.opt.gpu_ids = []
         for str_id in str_ids:
@@ -148,7 +213,12 @@ class BaseOptions:
                 self.opt.checkpoints_dir, self.opt.name, self.opt.export_folder
             )
             util.mkdir(self.opt.export_folder)
-
+        expr_dir = os.path.join(
+            self.opt.checkpoints_dir,
+            self.opt.name,
+            time_s if self.is_train else self.opt.timestamp,
+        )
+        self.opt.expr_dir = expr_dir
         if self.is_train:
             print("------------ Options -------------")
             for k, v in sorted(args.items()):
@@ -156,7 +226,7 @@ class BaseOptions:
             print("-------------- End ----------------")
 
             # save to the disk
-            expr_dir = os.path.join(self.opt.checkpoints_dir, self.opt.name)
+
             util.mkdir(expr_dir)
 
             file_name = os.path.join(expr_dir, "opt.txt")

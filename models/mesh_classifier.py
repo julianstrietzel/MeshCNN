@@ -1,11 +1,15 @@
-import torch
-from . import networks
+from datetime import datetime
 from os.path import join
+
+import numpy as np
+import torch
+from torchmetrics.functional.classification import binary_confusion_matrix
 from util.util import seg_accuracy, print_network
+from . import networks
 
 
 class ClassifierModel:
-    """ Class for training Model weights
+    """Class for training Model weights
 
     :args opt: structure containing configuration params
     e.g.,
@@ -22,7 +26,7 @@ class ClassifierModel:
             if self.gpu_ids
             else torch.device("cpu")
         )
-        self.save_dir = join(opt.checkpoints_dir, opt.name)
+        self.save_dir = opt.expr_dir
         self.optimizer = None
         self.edge_features = None
         self.labels = None
@@ -55,18 +59,30 @@ class ClassifierModel:
             self.scheduler = networks.get_scheduler(self.optimizer, opt)
             print_network(self.net)
 
-        if not self.is_train or opt.continue_train:
+        if self.is_train and opt.pretrained_path:
+            self.load_network(opt.pretrained_path)
+        elif not self.is_train or opt.continue_train:
             self.load_network(opt.which_epoch)
 
-    def set_input(self, data):
-        input_edge_features = torch.from_numpy(data["edge_features"]).float()
-        labels = torch.from_numpy(data["label"]).long()
-        # set inputs
+    def set_input(self, data, inference=False):
+        if type(data["edge_features"]) == torch.Tensor:
+            input_edge_features = data["edge_features"].float()
+        elif type(data["edge_features"]) == np.ndarray:
+            input_edge_features = torch.from_numpy(data["edge_features"]).float()
+        else:
+            raise ValueError("edge_features must be either torch.Tensor or np.ndarray")
         self.edge_features = input_edge_features.to(self.device).requires_grad_(
             self.is_train
         )
-        self.labels = labels.to(self.device)
         self.mesh = data["mesh"]
+        if inference:
+            return  # At inference time, we don't need to set labels.
+        labels = None
+        if self.opt.dataset_mode == "classification":
+            labels = torch.from_numpy(data["label"]).long()
+        elif self.opt.dataset_mode == "regression":
+            labels = torch.from_numpy(data["regression_target"]).float()
+        self.labels = labels.to(self.device)
         if self.opt.dataset_mode == "segmentation" and not self.is_train:
             self.soft_label = torch.from_numpy(data["soft_label"])
 
@@ -89,7 +105,11 @@ class ClassifierModel:
     def load_network(self, which_epoch):
         """load model from disk"""
         save_filename = "%s_net.pth" % which_epoch
-        load_path = join(self.save_dir, save_filename)
+        if self.is_train and self.opt.pretrained_path:
+            load_path = self.opt.pretrained_path
+            self.opt.pretrained_path = None
+        else:
+            load_path = join(self.save_dir, save_filename)
         net = self.net
         if isinstance(net, torch.nn.DataParallel):
             net = net.module
@@ -99,12 +119,13 @@ class ClassifierModel:
         state_dict = torch.load(load_path, map_location=str(self.device))
         if hasattr(state_dict, "_metadata"):
             del state_dict._metadata
-        net.load_state_dict(state_dict)
+        net.load_state_dict(state_dict, strict=False)
 
     def save_network(self, which_epoch):
         """save model to disk"""
         save_filename = "%s_net.pth" % (which_epoch)
         save_path = join(self.save_dir, save_filename)
+        print("saving the model to %s" % save_path)
         if len(self.gpu_ids) > 0 and torch.cuda.is_available():
             torch.save(self.net.module.cpu().state_dict(), save_path)
             self.net.cuda(self.gpu_ids[0])
@@ -122,20 +143,49 @@ class ClassifierModel:
         returns: number correct and total number
         """
         with torch.no_grad():
-            out = self.forward()
-            # compute number of correct
-            pred_class = out.data.max(1)[1]
-            label_class = self.labels
-            self.export_segmentation(pred_class.cpu())
-            correct = self.get_accuracy(pred_class, label_class)
-        return correct, len(label_class)
+            if self.opt.dataset_mode == "classification":
+                out = self.forward()
+                # compute number of correct
+                pred_class = out.data.max(1)[1]
+                label_class = self.labels
+                self.export_segmentation(pred_class.cpu())
+                metrics = self.get_accuracy(pred_class, label_class)
+            elif self.opt.dataset_mode == "regression":
+                out = self.forward()
+                # compute number of correct
+                pred = out.data.cpu()
+                label_class = self.labels.cpu()
+                mae_times_n = self.get_accuracy(pred, label_class)
+                sign_correct = self.get_accuracy(pred, label_class, "sign")
+                pred_plus_minus_one = torch.where(
+                    pred > 0, torch.ones_like(pred), torch.zeros_like(pred)
+                )
+                label_class_plus_minus_one = torch.where(
+                    label_class > 0,
+                    torch.ones_like(label_class),
+                    torch.zeros_like(label_class),
+                )
+                conf_matrix = binary_confusion_matrix(
+                    pred_plus_minus_one, label_class_plus_minus_one
+                )
+                metrics = dict(
+                    mae_times_n=mae_times_n,
+                    sign_correct=sign_correct,
+                    conf_matrix=conf_matrix,
+                )
+        return metrics, len(label_class)
 
-    def get_accuracy(self, pred, labels):
-        """computes accuracy for classification / segmentation """
-        if self.opt.dataset_mode == "classification":
+    def get_accuracy(self, pred, labels, mode=None):
+        """computes accuracy for classification / segmentation"""
+        mode = mode or self.opt.dataset_mode
+        if mode == "classification":
             correct = pred.eq(labels).sum()
-        elif self.opt.dataset_mode == "segmentation":
+        elif mode == "segmentation":
             correct = seg_accuracy(pred, self.soft_label, self.mesh)
+        elif mode == "regression":
+            correct = abs(pred - labels).sum()
+        elif mode == "sign":
+            correct = pred.sign().eq(labels.sign()).sum()
         return correct
 
     def export_segmentation(self, pred_seg):

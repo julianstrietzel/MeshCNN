@@ -1,10 +1,12 @@
+import functools
+
 import torch
 import torch.nn as nn
-from torch.nn import init
-import functools
-from torch.optim import lr_scheduler
-from models.layers.mesh_conv import MeshConv
 import torch.nn.functional as F
+from torch.nn import init
+from torch.optim import lr_scheduler
+
+from models.layers.mesh_conv import MeshConv
 from models.layers.mesh_pool import MeshPool
 from models.layers.mesh_unpool import MeshUnpool
 
@@ -107,8 +109,8 @@ def init_weights(net, init_type, init_gain):
 def init_net(net, init_type, init_gain, gpu_ids):
     if len(gpu_ids) > 0:
         assert torch.cuda.is_available()
-        net.cuda(gpu_ids[0])
-        net = net.cuda()
+        net.to("cuda")
+        net = net.to("cuda")
         net = torch.nn.DataParallel(net, gpu_ids)
     if init_type != "none":
         init_weights(net, init_type, init_gain)
@@ -131,6 +133,7 @@ def define_classifier(
             opt.pool_res,
             opt.fc_n,
             opt.resblocks,
+            opt.relu_deactivated,
         )
     elif arch == "meshunet":
         down_convs = [input_nc] + ncf
@@ -146,10 +149,61 @@ def define_classifier(
 
 def define_loss(opt):
     if opt.dataset_mode == "classification":
-        loss = torch.nn.CrossEntropyLoss()
+        return torch.nn.CrossEntropyLoss()
     elif opt.dataset_mode == "segmentation":
-        loss = torch.nn.CrossEntropyLoss(ignore_index=-1)
-    return loss
+        return torch.nn.CrossEntropyLoss(ignore_index=-1)
+    elif opt.dataset_mode == "regression":
+        if not hasattr(opt, "loss") or opt.loss == "mse":
+            return torch.nn.MSELoss()
+        elif opt.loss == "custom_loss":
+            alpha = 0.5 if not hasattr(opt, "loss_alpha") else opt.loss_alpha
+            return CustomMSELoss(alpha=alpha)
+        elif opt.loss == "custom_relu_mse_loss":
+            return CustomHingeMSELoss()
+    raise NotImplementedError(
+        f"choose dataset_mode from [classification | segmentation | regression] {opt.dataset_mode} is not supported"
+    )
+
+
+class CustomMSELoss(nn.Module):
+    def __init__(self, alpha=1.0):
+        super(CustomMSELoss, self).__init__()
+        self.mse_loss = nn.MSELoss()
+        self.alpha = alpha
+
+    def forward(self, output, target):
+        # Calculate the MSE loss
+        mse_loss = self.mse_loss(output, target)
+
+        # Calculate the penalty for wrong sign
+        sign_penalty = torch.mean(
+            torch.where(
+                output * target < 0,
+                self.alpha * torch.abs(output - target),
+                torch.zeros_like(output),
+            )
+        )
+        # Combine the MSE loss and the sign penalty
+        total_loss = mse_loss + sign_penalty
+
+        return total_loss
+
+
+class CustomHingeMSELoss(nn.Module):
+    def __init__(self):
+        super(CustomHingeMSELoss, self).__init__()
+
+    def forward(self, output, target):
+        # Calculate the penalty for wrong sign
+        sign_penalty = torch.mean(
+            torch.where(
+                output * target < 0,
+                torch.square(output - target),
+                torch.zeros_like(output),
+            )
+        )
+        # Combine the MSE loss and the sign penalty
+        return sign_penalty
 
 
 ##############################################################################
@@ -171,21 +225,27 @@ class MeshConvNet(nn.Module):
         pool_res,
         fc_n,
         nresblocks=3,
+        relu_deactivated=False,
     ):
         super(MeshConvNet, self).__init__()
         self.k = [nf0] + conv_res
         self.res = [input_res] + pool_res
         norm_args = get_norm_args(norm_layer, self.k[1:])
-
         for i, ki in enumerate(self.k[:-1]):
-            setattr(self, "conv{}".format(i), MResConv(ki, self.k[i + 1], nresblocks))
+            setattr(
+                self,
+                "conv{}".format(i),
+                MResConv(
+                    ki, self.k[i + 1], nresblocks, relu_deactivated=relu_deactivated
+                ),
+            )
             setattr(self, "norm{}".format(i), norm_layer(**norm_args[i]))
             setattr(self, "pool{}".format(i), MeshPool(self.res[i + 1]))
 
         self.gp = torch.nn.AvgPool1d(self.res[-1])
         # self.gp = torch.nn.MaxPool1d(self.res[-1])
         self.fc1 = nn.Linear(self.k[-1], fc_n)
-        self.fc2 = nn.Linear(fc_n, nclasses)
+        self.fc2 = nn.Linear(fc_n, nclasses) if nclasses >= 2 else nn.Linear(fc_n, 1)
 
     def forward(self, x, mesh):
 
@@ -196,19 +256,19 @@ class MeshConvNet(nn.Module):
 
         x = self.gp(x)
         x = x.view(-1, self.k[-1])
-
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return x
 
 
 class MResConv(nn.Module):
-    def __init__(self, in_channels, out_channels, skips=1):
+    def __init__(self, in_channels, out_channels, skips=1, relu_deactivated=False):
         super(MResConv, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.skips = skips
         self.conv0 = MeshConv(self.in_channels, self.out_channels, bias=False)
+        self.potential_relu = F.relu if not relu_deactivated else lambda x: x
         for i in range(self.skips):
             setattr(self, "bn{}".format(i + 1), nn.BatchNorm2d(self.out_channels))
             setattr(
@@ -224,7 +284,9 @@ class MResConv(nn.Module):
             x = getattr(self, "bn{}".format(i + 1))(F.relu(x))
             x = getattr(self, "conv{}".format(i + 1))(x, mesh)
         x += x1
-        x = F.relu(x)
+        x = self.potential_relu(
+            x
+        )  # should we remove this? That is the relu we are talking about
         return x
 
 

@@ -5,7 +5,7 @@ We therefore adopt MeshCNN for regression and feed it with positional data to ge
 The idea is to use Neural Networks as alternative to the classical (normal aware) distance field extraction methods, that 
 have troubles when e.g. normals are not well defined:
 ![img.png](docs/imgs/results_overview.png)
-If interested in the topic, you can find our final report here: [Final_Report_Robust_Neural_Fields.pdf](Final_Report_Robust_Neural_Fields.pdf)  
+If interested in the topic, you can find our final report here: [Final_Report_Robust_Neural_Fields.pdf](docs/Final_Report.pdf)  
 The BACON fork we adopted as a framework to implement different distance extractors can be found here: [BACON](https://github.com/julianstrietzel/bacon)  
 ![architecture.png](docs%2Fimgs%2Farchitecture.png)
 The project is part of the lecture "[Advanced Deep Learning for Computer Vision](https://niessner.github.io/ADL4CV/)" at the Technical University of Munich.
